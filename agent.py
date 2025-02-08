@@ -1,4 +1,6 @@
 import logging
+import asyncio
+from typing import List, Optional, AsyncGenerator
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -8,10 +10,9 @@ from livekit.agents import (
     WorkerOptions,
     cli,
     llm,
-    metrics,
 )
 from livekit.agents.pipeline import VoicePipelineAgent
-from livekit.plugins import openai, silero, turn_detector, elevenlabs
+from livekit.plugins import silero, turn_detector, elevenlabs
 from livekit.plugins.openai import stt
 
 load_dotenv(dotenv_path=".env.local")
@@ -23,7 +24,6 @@ def prewarm(proc: JobProcess):
 
 groq_stt = stt.STT.with_groq(
   model="whisper-large-v3-turbo",
-  language="ja",
 )
 
 eleven_tts=elevenlabs.tts.TTS(
@@ -45,52 +45,53 @@ eleven_tts=elevenlabs.tts.TTS(
     chunk_length_schedule=[80, 120, 200, 260],
 )
 
+# 1. Custom LLM Bridge (Dummy implementation)
+class CustomLLM(llm.LLM):
+    async def chat(self, chat_ctx: llm.ChatContext, fnc_ctx: Optional[llm.FunctionContext] = None) -> AsyncGenerator[str, None]:
+        # Let's inspect what chat_ctx contains
+        logger.info("Chat Context Messages:")
+        for msg in chat_ctx.messages:
+            logger.info(f"Role: {msg.role}, Text: {msg.content}")
+            
+        # Convert to messages format
+        messages = [
+            {"role": msg.role, "content": msg.content}
+            for msg in chat_ctx.messages
+        ]
+        
+        logger.info(f"Converted Messages: {messages}")
+        
+        # Dummy response for now
+        response = "Hello! I am a mock Japanese teaching assistant. どうぞよろしく！"
+        for chunk in response.split():
+            yield chunk + " "
 
 async def entrypoint(ctx: JobContext):
-    initial_ctx = llm.ChatContext().append(
-        role="system",
-        text=(
-            "You are a Japanese voice assistant created by LiveKit. Your interface with users will be voice. "
-            "You should use short and concise responses, and avoiding usage of unpronouncable punctuation. "
-            "You were created as a demo to showcase the capabilities of LiveKit's agents framework."
-        ),
-    )
-
-    logger.info(f"connecting to room {ctx.room.name}")
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-
-    # Wait for the first participant to connect
     participant = await ctx.wait_for_participant()
-    logger.info(f"starting voice assistant for participant {participant.identity}")
 
-    # This project is configured to use Deepgram STT, OpenAI LLM and Cartesia TTS plugins
-    # Other great providers exist like Cerebras, ElevenLabs, Groq, Play.ht, Rime, and more
-    # Learn more and pick the best one for your app:
-    # https://docs.livekit.io/agents/plugins
+    # 3. Create Agent with Custom LLM
     agent = VoicePipelineAgent(
-        vad=ctx.proc.userdata["vad"],
+        vad=silero.VAD.load(),
         stt=groq_stt,
-        llm=openai.LLM(model="gpt-4o-mini"),
+        llm=CustomLLM(),  # Your custom bridge
         tts=eleven_tts,
         turn_detector=turn_detector.EOUModel(),
-        # minimum delay for endpointing, used when turn detector believes the user is done with their turn
-        min_endpointing_delay=0.5,
-        # maximum delay for endpointing, used when turn detector does not believe the user is done with their turn
-        max_endpointing_delay=5.0,
-        chat_ctx=initial_ctx,
+        chat_ctx=llm.ChatContext().append(
+            text="You are a Japanese language teaching assistant.",
+            role="system"
+        )
     )
 
-    usage_collector = metrics.UsageCollector()
-
-    @agent.on("metrics_collected")
-    def on_metrics_collected(agent_metrics: metrics.AgentMetrics):
-        metrics.log_metrics(agent_metrics)
-        usage_collector.collect(agent_metrics)
+    # 4. Manual Interaction Handling
+    @agent.on("llm_response")
+    def on_llm_response(response: str):
+        logger.info(f"LLM Response: {response}")
+        # Create task for async operations
+        asyncio.create_task(agent.say(response))
 
     agent.start(ctx.room, participant)
-
-    # The agent should be polite and greet the user when it joins :)
-    await agent.say("Hey, how can I help you today?", allow_interruptions=True)
+    await agent.say("Hi richard, how can I help you today?", allow_interruptions=True)
 
 
 if __name__ == "__main__":
