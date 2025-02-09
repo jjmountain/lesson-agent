@@ -15,7 +15,7 @@ from livekit.agents.pipeline import VoicePipelineAgent
 from livekit.plugins import silero, turn_detector, elevenlabs
 from livekit.plugins.openai import stt
 
-load_dotenv(dotenv_path=".env.local")
+load_dotenv(dotenv_path=".env")
 logger = logging.getLogger("voice-agent")
 logger.setLevel(logging.INFO)
 
